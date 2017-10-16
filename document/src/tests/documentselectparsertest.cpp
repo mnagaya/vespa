@@ -34,6 +34,8 @@ class DocumentSelectParserTest : public CppUnit::TestFixture {
     CPPUNIT_TEST(testThatComplexFieldValuesHaveCorrectFieldNames);
     CPPUNIT_TEST(testBodyFieldDetection);
     CPPUNIT_TEST(testDocumentUpdates);
+    CPPUNIT_TEST(test_syntax_error_reporting);
+    CPPUNIT_TEST(test_operator_precedence);
     CPPUNIT_TEST_SUITE_END();
 
     BucketIdFactory _bucketIdFactory;
@@ -51,11 +53,13 @@ class DocumentSelectParserTest : public CppUnit::TestFixture {
             const std::string& hstr);
 
     std::unique_ptr<select::FieldValueNode>
-    parseFieldValue(const std::string expression);
+    parseFieldValue(const std::string& expression);
 
     template <typename ContainsType>
     select::ResultList doParse(const vespalib::stringref& expr,
                                const ContainsType& t);
+
+    std::string parse_to_tree(const std::string& str);
 public:
 
     DocumentSelectParserTest()
@@ -88,7 +92,8 @@ public:
     void testDocumentUpdates2();
     void testDocumentUpdates3();
     void testDocumentUpdates4();
-    void testDocumentUpdates5();
+    void test_syntax_error_reporting();
+    void test_operator_precedence();
 };
 
 CPPUNIT_TEST_SUITE_REGISTRATION(DocumentSelectParserTest);
@@ -102,6 +107,8 @@ void DocumentSelectParserTest::setUp()
     DocumenttypesConfigBuilderHelper builder(TestDocRepo::getDefaultConfig());
     builder.document(535424777, "notandor",
                      Struct("notandor.header"), Struct("notandor.body"));
+    builder.document(567356743, "and",
+                     Struct("and.header"), Struct("and.body"));
     builder.document(1348665801, "ornotand",
                      Struct("ornotand.header"), Struct("ornotand.body"));
     builder.document(-1848670693, "andornot",
@@ -111,9 +118,9 @@ void DocumentSelectParserTest::setUp()
     builder.document(-1673092522, "usergroup",
                      Struct("usergroup.header"),
                      Struct("usergroup.body"));
-    _repo.reset(new DocumentTypeRepo(builder.config()));
+    _repo = std::make_unique<DocumentTypeRepo>(builder.config());
 
-    _parser.reset(new select::Parser(*_repo, _bucketIdFactory));
+    _parser = std::make_unique<select::Parser>(*_repo, _bucketIdFactory);
 }
 
 Document::SP DocumentSelectParserTest::createDoc(
@@ -319,6 +326,35 @@ void verifyParse(const std::string& query, const char* expected = 0) {
     }
 }
 
+void DocumentSelectParserTest::test_syntax_error_reporting() {
+    createDocs();
+
+    verifyFailedParse("testdoctype1.headerval == aaa", "ParsingFailedException: "
+                      "syntax error, unexpected end of input, expecting . at column 30 "
+                      "when parsing selection 'testdoctype1.headerval == aaa'");
+    verifyFailedParse("testdoctype1.headerval == \"tab\\x0notcomplete\"",
+                      "ParsingFailedException: Unexpected character: '\\\"' at column 27 "
+                      "when parsing selection 'testdoctype1.headerval == \"tab\\x0notcomplete\"'");
+    verifyFailedParse("testdoctype1.headerval == \"tab\\ysf\"",
+                      "ParsingFailedException: Unexpected character: '\\\"' at column 27 "
+                      "when parsing selection 'testdoctype1.headerval == \"tab\\ysf\"'");
+    // Test illegal operator
+    verifyFailedParse("testdoctype1.headerval <> 12", "ParsingFailedException: syntax error, "
+                      "unexpected > at column 25 when parsing selection 'testdoctype1.headerval <> 12'");
+
+    // This will trigger a missing doctype error instead of syntax error, as "fal"
+    // will be reduced into a doctype rule.
+    verifyFailedParse("fal se", "ParsingFailedException: Document type 'fal' "
+                       "not found at column 1 when parsing selection 'fal se'");
+
+    verifyFailedParse("mytype", "ParsingFailedException: Document type 'mytype' not found");
+
+    verifyFailedParse("mytype.foo.bar", "ParsingFailedException: Document type 'mytype' not found");
+
+    verifyFailedParse("testdoctype1 == 8", "ParsingFailedException: syntax error, unexpected ==, "
+                      "expecting end of input at column 14 when parsing selection 'testdoctype1 == 8'");
+}
+
 void DocumentSelectParserTest::testParseTerminals()
 {
     createDocs();
@@ -332,9 +368,7 @@ void DocumentSelectParserTest::testParseTerminals()
                 "testdoctype1.headerval == 2.34124e+08");
     verifyParse("testdoctype1.headerval == -234123.523E-3",
                 "testdoctype1.headerval == -234.124");
-    verifyFailedParse("testdoctype1.headerval == aaa", "ParsingFailedException: "
-            "Unexpected token at position 23 ('== aaa') in query "
-            "'testdoctype1.headerval == aaa', at fullParse in ");
+
       // Test string value
     verifyParse("testdoctype1.headerval == \"test\"");
     std::unique_ptr<select::Node> node(
@@ -360,22 +394,11 @@ void DocumentSelectParserTest::testParseTerminals()
     verifyParse("testdoctype1.headerval == \"tab\\x09test\"",
                 "testdoctype1.headerval == \"tab\\ttest\"");
     verifyParse("testdoctype1.headerval == \"tab\\x055test\"");
-    verifyFailedParse("testdoctype1.headerval == \"tab\\x0notcomplete\"",
-            "ParsingFailedException: Unexpected token at position 23 "
-            "('== \"tab\\x0') in query 'testdoctype1.headerval == \"tab\\x0notcomplete\"', "
-            "at fullParse in ");
-    verifyFailedParse("testdoctype1.headerval == \"tab\\ysf\"",
-            "ParsingFailedException: Unexpected token at position 23 "
-            "('== \"tab\\ys') in query 'testdoctype1.headerval == \"tab\\ysf\"', "
-            "at fullParse in ");
     node = _parser->parse("testdoctype1.headerval == \"\\tt\\x48 \\n\"");
     select::Compare& escapednode(dynamic_cast<select::Compare&>(*node));
     const select::StringValueNode& escval(
         dynamic_cast<const select::StringValueNode&>(escapednode.getRight()));
     CPPUNIT_ASSERT_EQUAL(vespalib::string("\ttH \n"), escval.getValue());
-      // Test illegal operator
-    verifyFailedParse("testdoctype1.headerval <> 12", "ParsingFailedException: Unexpected"
-            " token at position 23 ('<> 12') in query 'testdoctype1.headerval <> 12', at");
       // Test <= <, > >=
     verifyParse("testdoctype1.headerval >= 123");
     verifyParse("testdoctype1.headerval > 123");
@@ -387,18 +410,14 @@ void DocumentSelectParserTest::testParseTerminals()
     verifyParse("testdoctype1.headerval", "testdoctype1.headerval != null");
 
       // Test bools
-    verifyParse("TRUE");
-    verifyParse("FALSE");
+    verifyParse("TRUE", "true");
+    verifyParse("FALSE", "false");
     verifyParse("true");
     verifyParse("false");
-    verifyParse("faLSe");
-    verifyFailedParse("fal se", "ParsingFailedException: Unexpected token at "
-                                "position 4 ('se') in query 'fal se', at");
+    verifyParse("faLSe", "false");
 
       // Test document types
     verifyParse("testdoctype1");
-    verifyFailedParse("mytype", "ParsingFailedException: Document type mytype "
-                                "not found");
     verifyParse("_test_doctype3_");
     verifyParse("_test_doctype3_._only_in_child_ == 0");
 
@@ -429,9 +448,6 @@ void DocumentSelectParserTest::testParseTerminals()
                 "id.bucket == -9223372036854775566");
     verifyParse("id.gid == \"gid(0xd755743aea262650274d70f0)\"");
 
-    // Test search column
-    verifyParse("searchcolumn.10 == 2");
-
       // Test other operators
     verifyParse("id.scheme = \"*doc\"");
     verifyParse("testdoctype1.hstringval =~ \"(john|barry|shrek)\"");
@@ -441,8 +457,6 @@ void DocumentSelectParserTest::testParseTerminals()
     verifyParse("id.specific.hash() == 124");
     verifyParse("testdoctype1.hstringval.lowercase() == \"chang\"");
     verifyParse("testdoctype1.hstringval.lowercase().hash() == 124");
-    verifyFailedParse("testdoctype1 == 8", "ParsingFailedException: Unexpected token"
-            " at position 13 ('== 8') in query 'testdoctype1 == 8', at fullParse in ");
     verifyParse("testdoctype1.hintval > now()");
     verifyParse("testdoctype1.hintval > now().abs()");
 
@@ -475,21 +489,22 @@ void DocumentSelectParserTest::testParseBranches()
 {
     createDocs();
 
-    verifyParse("TRUE or FALSE aNd FALSE oR TRUE");
-    verifyParse("TRUE and FALSE or FALSE and TRUE");
-    verifyParse("TRUE or FALSE and FALSE or TRUE");
-    verifyParse("(TRUE or FALSE) and (FALSE or TRUE)");
-    verifyParse("true or (not false) and not true");
+    verifyParse("TRUE or FALSE aNd FALSE oR TRUE", "true OR false AND false OR true");
+    verifyParse("TRUE and FALSE or FALSE and TRUE", "true AND false OR false AND true");
+    verifyParse("TRUE or FALSE and FALSE or TRUE", "true OR false AND false OR true");
+    verifyParse("(TRUE or FALSE) and (FALSE or TRUE)", "(true OR false) AND (false OR true)");
+    verifyParse("true or (not false) and not true", "true OR (NOT false) AND NOT true");
 
         // Test number branching with node branches
-    verifyParse("((243) < 300 and (\"FOO\").lowercase() == (\"foo\"))");
+    verifyParse("((243) < 300 and (\"FOO\").lowercase() == (\"foo\"))",
+                "((243) < 300 AND (\"FOO\").lowercase() == (\"foo\"))");
 
       // Strange doctype names
-    verifyParse("notandor and ornotand");
-    verifyParse("ornotand or andornot");
-    verifyParse("not andornot");
-    verifyParse("idid or not usergroup");
-    verifyParse("not(andornot or idid)", "not (andornot or idid)");
+    verifyParse("notandor and ornotand", "notandor AND ornotand");
+    verifyParse("ornotand or andornot", "ornotand OR andornot");
+    verifyParse("not andornot", "NOT andornot");
+    verifyParse("idid or not usergroup", "idid OR NOT usergroup");
+    verifyParse("not(andornot or idid)", "NOT (andornot OR idid)");
 }
 
 template <typename ContainsType>
@@ -702,9 +717,6 @@ void DocumentSelectParserTest::testOperators3()
     PARSEI("id.user = 1234", *_doc[8], True);
     PARSEI("id.group == \"1234\"", *_doc[8], True);
     PARSEI("id.group == \"mygroup\"", *_doc[9], True);
-
-    // Searchcolumn policy
-    PARSE("searchcolumn.10 == 8", *_doc[0], True);
 }
 
 void DocumentSelectParserTest::testOperators4()
@@ -977,15 +989,14 @@ void DocumentSelectParserTest::testVisitor()
 
     TestVisitor v;
     root->visit(v);
+
     std::string expected =
-        "OR(CONSTANT(true), "
-            "AND(DOCTYPE(testdoctype1), "
-                "AND(OR(NOT(COMPARE(id.user = 12)), "
-                        "COMPARE(testdoctype1.hstringval = \"ola\")), "
-                    "COMPARE(testdoctype1.headerval != null)"
-                ")"
-            ")"
-        ")";
+            "OR(CONSTANT(true), "
+               "AND(AND(DOCTYPE(testdoctype1), "
+                       "OR(NOT(COMPARE(id.user = 12)), "
+                          "COMPARE(testdoctype1.hstringval = \"ola\"))), "
+                   "COMPARE(testdoctype1.headerval != null)))";
+
     CPPUNIT_ASSERT_EQUAL(expected, v.getVisitString());
 }
 
@@ -1221,7 +1232,7 @@ void DocumentSelectParserTest::testUtf8()
 }
 
 std::unique_ptr<select::FieldValueNode>
-DocumentSelectParserTest::parseFieldValue(const std::string expression) {
+DocumentSelectParserTest::parseFieldValue(const std::string& expression) {
     return std::unique_ptr<select::FieldValueNode>(dynamic_cast<select::FieldValueNode *>(
         dynamic_cast<const select::Compare &>(*_parser->parse(expression)).getLeft().clone().release()));
 }
@@ -1244,6 +1255,132 @@ void DocumentSelectParserTest::testThatComplexFieldValuesHaveCorrectFieldNames()
     CPPUNIT_ASSERT_EQUAL(
         vespalib::string("headerval"),
         parseFieldValue("testdoctype1.headerval.meow.meow{test}")->getRealFieldName());
+}
+
+namespace {
+
+class OperatorVisitor : public select::Visitor {
+private:
+    std::ostringstream data;
+
+public:
+    ~OperatorVisitor() {}
+
+    void visitConstant(const select::Constant& node) override {
+        data << node;
+    }
+
+    void
+    visitInvalidConstant(const select::InvalidConstant& node) override {
+        (void) node;
+        assert(false);
+    }
+
+    void visitDocumentType(const select::DocType& node) override {
+        data << "(DOCTYPE " << node << ")";
+    }
+
+    void visitComparison(const select::Compare& node) override {
+        data << '(' << node.getOperator() << ' ';
+        node.getLeft().visit(*this);
+        data << ' ';
+        node.getRight().visit(*this);
+        data << ')';
+    }
+
+    void visitAndBranch(const select::And& node) override {
+        data << "(AND ";
+        node.getLeft().visit(*this);
+        data << " ";
+        node.getRight().visit(*this);
+        data << ")";
+    }
+
+    void visitOrBranch(const select::Or& node) override {
+        data << "(OR ";
+        node.getLeft().visit(*this);
+        data << " ";
+        node.getRight().visit(*this);
+        data << ")";
+    }
+
+    void visitNotBranch(const select::Not& node) override {
+        data << "(NOT ";
+        node.getChild().visit(*this);
+        data << ")";
+    }
+
+    void visitArithmeticValueNode(const select::ArithmeticValueNode& node) override {
+        data << '(' << node.getOperatorName() << ' ';
+        node.getLeft().visit(*this);
+        data << ' ';
+        node.getRight().visit(*this);
+        data << ')';
+    }
+    void visitFunctionValueNode(const select::FunctionValueNode& node) override {
+        data << '(' << node.getFunctionName() << ' ';
+        node.getChild().visit(*this);
+        data << ')';
+    }
+    void visitIdValueNode(const select::IdValueNode&) override {
+        data << "ID!";
+    }
+    void visitSearchColumnValueNode(const select::SearchColumnValueNode&) override {}
+    void visitFieldValueNode(const select::FieldValueNode&) override {
+        data << "FIELD!";
+    }
+    void visitFloatValueNode(const select::FloatValueNode& node) override {
+        data << node.getValue();
+    }
+    void visitVariableValueNode(const select::VariableValueNode&) override {
+        data << "VAR!";
+    }
+    void visitIntegerValueNode(const select::IntegerValueNode& node) override {
+        data << node.getValue();
+    }
+    void visitCurrentTimeValueNode(const select::CurrentTimeValueNode&) override {}
+    void visitStringValueNode(const select::StringValueNode& str) override {
+        data << '"' << str.getValue() << '"';
+    }
+    void visitNullValueNode(const select::NullValueNode&) override {
+        data << "null";
+    }
+    void visitInvalidValueNode(const select::InvalidValueNode&) override {
+        data << "INVALID!";
+    }
+
+    std::string getVisitString() { return data.str(); }
+};
+
+}
+
+std::string DocumentSelectParserTest::parse_to_tree(const std::string& str) {
+    std::unique_ptr<select::Node> root(_parser->parse(str));
+
+    OperatorVisitor v;
+    root->visit(v);
+    return v.getVisitString();
+}
+
+void DocumentSelectParserTest::test_operator_precedence() {
+    createDocs();
+    using namespace std::string_literals;
+
+    CPPUNIT_ASSERT_EQUAL("(AND true false)"s, parse_to_tree("true and false"));
+    CPPUNIT_ASSERT_EQUAL("(OR (== 1 2) (== 3 4))"s, parse_to_tree("1==2 or 3==4"));
+    CPPUNIT_ASSERT_EQUAL("(!= (+ (+ 1 2) 3) 0)"s, parse_to_tree("1+2+3 != 0"));
+    CPPUNIT_ASSERT_EQUAL("(!= (+ (+ 1.1 2.2) 3.3) 4.4)"s, parse_to_tree("1.1+2.2+3.3 != 4.4"));
+    CPPUNIT_ASSERT_EQUAL("(!= (- (- 1 2) 3) 0)"s, parse_to_tree("1-2-3 != 0"));
+    CPPUNIT_ASSERT_EQUAL("(!= (+ (+ 1 2) 3) 0)"s, parse_to_tree("1 + 2 + 3 != 0"));
+    CPPUNIT_ASSERT_EQUAL("(!= (+ 1 (* 2 3)) 0)"s, parse_to_tree("1 + 2 * 3 != 0"));
+    CPPUNIT_ASSERT_EQUAL("(!= (- (/ (* 1 2) 3) 4) 0)"s, parse_to_tree("1 * 2 / 3 - 4 != 0"));
+    CPPUNIT_ASSERT_EQUAL("(!= (/ (* 1 2) (- 3 4)) 0)"s, parse_to_tree("1 * 2 / (3 - 4) != 0"));
+    CPPUNIT_ASSERT_EQUAL("(OR (AND true (NOT (== 1 2))) false)"s,
+                         parse_to_tree("true and not 1 == 2 or false"));
+    // Unary plus is simply ignored by the parser.
+    CPPUNIT_ASSERT_EQUAL("(== 1 -2)"s, parse_to_tree("+1==-2"));
+    CPPUNIT_ASSERT_EQUAL("(== 1.23 -2.56)"s, parse_to_tree("+1.23==-2.56"));
+    CPPUNIT_ASSERT_EQUAL("(== (+ 1 2) (- 3 -4))"s, parse_to_tree("1 + +2==3 - -4"));
 }
 
 } // document

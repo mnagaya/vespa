@@ -115,6 +115,7 @@ class VariableValueNode : public ValueNode
 {
     vespalib::string _value;
 public:
+    // TODO stringref
     VariableValueNode(const vespalib::string & variableName) : _value(variableName) {}
 
     const vespalib::string& getVariableName() const { return _value; }
@@ -181,6 +182,61 @@ public:
 private:
 
     void initFieldPath(const DocumentType&) const;
+};
+
+class FunctionValueNode;
+
+// Only used by the parser to build a partial field expression
+class FieldExprNode : public ValueNode {
+    std::unique_ptr<FieldExprNode> _left_expr;
+    vespalib::string _right_expr;
+public:
+    explicit FieldExprNode(const vespalib::string& doctype) : _left_expr(), _right_expr(doctype) {}
+    FieldExprNode(std::unique_ptr<FieldExprNode> left_expr, vespalib::stringref right_expr)
+        : _left_expr(std::move(left_expr)), _right_expr(right_expr)
+    {}
+    FieldExprNode(const FieldExprNode &) = delete;
+    FieldExprNode & operator = (const FieldExprNode &) = delete;
+    FieldExprNode(FieldExprNode &&) = default;
+    FieldExprNode & operator = (FieldExprNode &&) = default;
+    ~FieldExprNode() = default;
+
+    const FieldExprNode* left_expr() const noexcept { return _left_expr.get(); }
+    const vespalib::string& right_expr() const noexcept { return _right_expr; }
+
+    // TODO test separately
+    std::unique_ptr<FieldValueNode> convert_to_field_value() const;
+    std::unique_ptr<FunctionValueNode> convert_to_function_call() const;
+    void build_mangled_expression(vespalib::string& dest) const;
+    const vespalib::string& resolve_doctype() const;
+
+    // These are not used, can just return dummy values.
+    std::unique_ptr<Value> getValue(const Context& context) const override {
+        (void) context;
+        return std::unique_ptr<Value>();
+    }
+    std::unique_ptr<Value> traceValue(const Context &context, std::ostream& out) const override {
+        (void) context;
+        (void) out;
+        return std::unique_ptr<Value>();
+    }
+    void print(std::ostream& out, bool verbose, const std::string& indent) const override {
+        (void) out;
+        (void) verbose;
+        (void) indent;
+    }
+    void visit(Visitor& visitor) const override {
+        (void) visitor;
+    }
+
+    ValueNode::UP clone() const override {
+        if (_left_expr) {
+            return wrapParens(new FieldExprNode(std::unique_ptr<FieldExprNode>(
+                    static_cast<FieldExprNode*>(_left_expr->clone().release())), _right_expr));
+        } else {
+            return wrapParens(new FieldExprNode(_right_expr));
+        }
+    }
 };
 
 class IdValueNode : public ValueNode
