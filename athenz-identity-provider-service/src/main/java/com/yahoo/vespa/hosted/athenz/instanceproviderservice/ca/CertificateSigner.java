@@ -108,6 +108,7 @@ public class CertificateSigner {
         }
     }
 
+    @SuppressWarnings("unchecked")
     static void assertCertificateExtensions(PKCS10CertificationRequest request) {
         List<String> illegalExt = Arrays
                 .stream(request.getAttributes(PKCSObjectIdentifiers.pkcs_9_at_extensionRequest))
